@@ -16,7 +16,6 @@ import { Review } from './entities/review.entity';
       autoLoadEntities: true,
       synchronize: true,
     }),
-    TypeOrmModule.forFeature([Movie, Review]),
   ],
   exports: [TypeOrmModule],
 })
