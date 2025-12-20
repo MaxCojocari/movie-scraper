@@ -1,7 +1,6 @@
-import { Entity, Column, PrimaryColumn, OneToMany } from 'typeorm';
-import { Review } from './review.entity';
+import { Entity, Column, PrimaryColumn } from 'typeorm';
 
-@Entity('movie')
+@Entity()
 export class Movie {
   @PrimaryColumn({ name: 'movie_uid' })
   movieUid: string; // slug like "parasite-2019"
@@ -32,7 +31,4 @@ export class Movie {
 
   @Column({ name: 'cast', type: 'text' })
   cast: string; // comma-separated (first 10)
-
-  @OneToMany(() => Review, (review) => review.movie)
-  reviews: Review[];
 }

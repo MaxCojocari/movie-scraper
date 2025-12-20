@@ -5,7 +5,7 @@ import { ScraperService } from './scraper/scraper.service';
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
 
-  await app.get(ScraperService).startScraping();
+  await app.get(ScraperService).startScraping(5);
 
   await app.close();
 }
