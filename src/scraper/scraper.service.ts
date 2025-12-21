@@ -173,8 +173,8 @@ export class ScraperService implements OnModuleDestroy {
 
     try {
       await driver.get(url);
-      await driver.wait(until.elementLocated(By.css('ul.poster-list')), 10000);
-      await this.sleep(1000);
+      await driver.wait(until.elementLocated(By.css('ul.poster-list')), 30000);
+      await this.sleep(1500);
 
       // Find all poster items
       const posterItems = await driver.findElements(By.css('li.posteritem'));
@@ -208,8 +208,8 @@ export class ScraperService implements OnModuleDestroy {
 
     try {
       await driver.get(url);
-      await driver.wait(until.elementLocated(By.css('body')), 10000);
-      await this.sleep(1000);
+      await driver.wait(until.elementLocated(By.css('body')), 30000);
+      await this.sleep(1500);
 
       const movie: ScrapedMovie = {
         slug,
@@ -258,9 +258,19 @@ export class ScraperService implements OnModuleDestroy {
 
       // Average Rating
       try {
-        const ratingEl = await driver.findElement(By.css('.average-rating a'));
-        const ratingText = await ratingEl.getText();
-        movie.avgRating = parseFloat(ratingText);
+        const ratingEl = await driver.findElement(
+          By.css('.average-rating a.tooltip'),
+        );
+        const titleAttr = await ratingEl.getAttribute('data-original-title');
+
+        const match = titleAttr.match(/Weighted average of ([\d.]+)/);
+
+        if (match) {
+          movie.avgRating = parseFloat(match[1]);
+        } else {
+          const ratingText = await ratingEl.getText();
+          movie.avgRating = parseFloat(ratingText);
+        }
       } catch (e) {
         this.logger.warn(`Rating not found for ${slug}`);
       }
@@ -384,8 +394,8 @@ export class ScraperService implements OnModuleDestroy {
 
     try {
       await driver.get(url);
-      await driver.wait(until.elementLocated(By.css('body')), 10000);
-      await this.sleep(1000);
+      await driver.wait(until.elementLocated(By.css('body')), 30000);
+      await this.sleep(1500);
 
       // Find all avatar links
       const avatarLinks = await driver.findElements(By.css('article a.avatar'));
@@ -425,8 +435,8 @@ export class ScraperService implements OnModuleDestroy {
     try {
       this.logger.log(`Processing reviewer: ${username}`);
       await driver.get(url);
-      await driver.wait(until.elementLocated(By.css('body')), 10000);
-      await this.sleep(1000);
+      await driver.wait(until.elementLocated(By.css('body')), 30000);
+      await this.sleep(1500);
 
       // Find all review articles (12 per page)
       const reviewArticles = await driver.findElements(
