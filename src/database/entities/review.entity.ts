@@ -16,4 +16,7 @@ export class Review {
 
   @Column({ name: 'review_text', type: 'text' })
   reviewText: string;
+
+  @Column({ name: 'review_hash', length: 64, unique: true })
+  reviewHash: string;
 }

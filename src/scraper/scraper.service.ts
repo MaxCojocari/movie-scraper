@@ -13,20 +13,22 @@ import { Repository } from 'typeorm';
 import { Movie } from '../database/entities/movie.entity';
 import { Review } from '../database/entities/review.entity';
 import { ScrapedMovie, ScrapedReview } from './interfaces';
+import { WaitingList } from '../database/entities/waiting-list.entity';
+import { createHash } from 'crypto';
 
 @Injectable()
 export class ScraperService implements OnModuleDestroy {
   private readonly logger = new Logger(ScraperService.name);
-  private driver: WebDriver | null = null;
+  private driver: WebDriver;
   private readonly baseUrl = 'https://letterboxd.com';
-  private waitingList: string[] = [];
-  private scrapedMovies: Set<string> = new Set();
 
   constructor(
     @InjectRepository(Movie)
     private movieRepository: Repository<Movie>,
     @InjectRepository(Review)
     private reviewRepository: Repository<Review>,
+    @InjectRepository(WaitingList)
+    private waitingListRepository: Repository<WaitingList>,
   ) {}
 
   private async getDriver(): Promise<WebDriver> {
@@ -55,57 +57,101 @@ export class ScraperService implements OnModuleDestroy {
   /**
    * Main scraping process following the strategy document
    */
-  async startScraping(targetNewFilms: number = 100) {
+  async startScraping(
+    targetNewFilms: number = 100,
+    batchSize: number = 20,
+    maxQueueSize: number = 25_000,
+  ): Promise<void> {
     this.logger.log(
-      `Starting scraping process. Target: ${targetNewFilms} new films`,
+      `Starting scraping process. Target: ${targetNewFilms} new films (batch size: ${batchSize})`,
     );
 
     let newFilmsParsed = 0;
     let currentPage = 1;
+    let filmBatch: string[] = [];
 
     while (newFilmsParsed < targetNewFilms) {
-      // Step 1: Access film list page and collect slugs
-      if (this.waitingList.length === 0) {
-        this.logger.log(`Fetching film slugs from page ${currentPage}`);
-        await this.scrapeFilmListPage(currentPage);
-        currentPage++;
+      // Step 1: Refill batch if empty
+      if (filmBatch.length === 0) {
+        const queueSize = await this.getWaitingListSize();
+
+        if (queueSize === 0) {
+          this.logger.log(
+            `Waiting list empty. Fetching film slugs from page ${currentPage}`,
+          );
+          await this.scrapeFilmListPage(currentPage);
+          currentPage++;
+        }
+
+        // Pop batch of films
+        filmBatch = await this.popBatchFromWaitingList(batchSize);
+
+        if (filmBatch.length === 0) {
+          this.logger.warn('No films in waiting list after fetch attempt');
+          continue;
+        }
+
+        this.logger.log(`Processing batch of ${filmBatch.length} films`);
       }
 
-      // Step 2: Pop next film from waiting list
-      const filmSlug = this.waitingList.pop();
+      // Step 2: Process next film from batch
+      const filmSlug = filmBatch.shift();
 
-      if (!filmSlug) {
-        this.logger.warn('Waiting list is empty, fetching next page');
-        continue;
-      }
-
-      // Check if already scraped (database query instead of memory)
-      const alreadyScraped = await this.isMovieScraped(filmSlug);
-      if (alreadyScraped) {
-        this.logger.log(`Film ${filmSlug} already scraped, skipping`);
+      if (!filmSlug || (await this.isMovieScraped(filmSlug))) {
         continue;
       }
 
       try {
         // Step 2: Scrape film data
-        this.logger.log(`Scraping film: ${filmSlug}`);
+        this.logger.log(
+          `Scraping film: ${filmSlug} (${newFilmsParsed + 1}/${targetNewFilms})`,
+        );
         const movieData = await this.scrapeMoviePage(filmSlug);
 
         // Save movie to DB
         await this.saveMovie(movieData);
         newFilmsParsed++;
 
+        // this.logger.log(
+        //   `Progress: ${newFilmsParsed}/${targetNewFilms} films scraped | Queue: ${await this.getWaitingListSize()} | Batch: ${filmBatch.length}`,
+        // );
+
+        // // Step 3: Scrape reviewers from film reviews page
+        // const reviewers = await this.scrapeFilmReviewers(filmSlug);
+        // this.logger.log(`Found ${reviewers.length} reviewers for ${filmSlug}`);
+
+        // // Step 4 & 5: Process each reviewer
+        // for (const reviewer of reviewers) {
+        //   await this.processReviewer(reviewer);
+        // }
+
+        const currentQueueSize = await this.getWaitingListSize();
         this.logger.log(
-          `Progress: ${newFilmsParsed}/${targetNewFilms} films scraped`,
+          `Progress: ${newFilmsParsed}/${targetNewFilms} | Queue: ${currentQueueSize}/${maxQueueSize} | Batch: ${filmBatch.length}`,
         );
 
-        // Step 3: Scrape reviewers from film reviews page
-        const reviewers = await this.scrapeFilmReviewers(filmSlug);
-        this.logger.log(`Found ${reviewers.length} reviewers for ${filmSlug}`);
+        // Check if queue is below max size before scraping reviews
+        if (currentQueueSize < maxQueueSize) {
+          const reviewers = await this.scrapeFilmReviewers(filmSlug);
+          this.logger.log(
+            `Found ${reviewers.length} reviewers for ${filmSlug}`,
+          );
 
-        // Step 4 & 5: Process each reviewer
-        for (const reviewer of reviewers) {
-          await this.processReviewer(reviewer);
+          for (const reviewer of reviewers) {
+            // Check queue size before processing each reviewer
+            const queueSize = await this.getWaitingListSize();
+            if (queueSize >= maxQueueSize) {
+              this.logger.warn(
+                `Queue full (${queueSize}/${maxQueueSize}). Skipping remaining reviewers for ${filmSlug}`,
+              );
+              break;
+            }
+            await this.processReviewer(reviewer);
+          }
+        } else {
+          this.logger.warn(
+            `Queue at max capacity (${currentQueueSize}/${maxQueueSize}). Skipping review scraping for ${filmSlug}`,
+          );
         }
 
         // Small delay between films
@@ -138,16 +184,12 @@ export class ScraperService implements OnModuleDestroy {
           const reactDiv = await item.findElement(By.css('.react-component'));
           const itemSlug = await reactDiv.getAttribute('data-item-slug');
           if (itemSlug) {
-            this.waitingList.push(itemSlug);
+            await this.pushToWaitingList(itemSlug);
           }
         } catch (e) {
           // Skip if can't find slug
         }
       }
-
-      this.logger.log(
-        `Added ${posterItems.length} films to waiting list from page ${pageNumber}`,
-      );
     } catch (error) {
       this.logger.error(
         `Error scraping film list page ${pageNumber}:`,
@@ -424,11 +466,9 @@ export class ScraperService implements OnModuleDestroy {
           await this.saveReview(review);
 
           // Step 5: Add film slug to waiting list if not already scraped
-          if (
-            !this.scrapedMovies.has(filmSlug) &&
-            !this.waitingList.includes(filmSlug)
-          ) {
-            this.waitingList.push(filmSlug);
+          const alreadyScraped = await this.isMovieScraped(filmSlug);
+          if (!alreadyScraped) {
+            await this.pushToWaitingList(filmSlug);
             this.logger.log(
               `Added ${filmSlug} to waiting list from ${username}'s reviews`,
             );
@@ -538,16 +578,121 @@ export class ScraperService implements OnModuleDestroy {
    * Save review to database
    */
   private async saveReview(reviewData: ScrapedReview): Promise<void> {
+    const reviewHash = this.generateReviewHash(reviewData);
+
+    const existing = await this.reviewRepository.findOne({
+      where: { reviewHash },
+    });
+
+    if (existing) {
+      this.logger.log(
+        `Review hash ${reviewHash.substring(0, 8)}... already exists, skipping`,
+      );
+      return;
+    }
+
     const review = new Review();
     review.userUid = reviewData.userUid;
     review.movieUid = reviewData.movieUid;
     review.rating = reviewData.rating!;
     review.reviewText = reviewData.reviewText;
+    review.reviewHash = reviewHash;
 
     await this.reviewRepository.save(review);
     this.logger.log(
       `Saved review: ${reviewData.userUid} -> ${reviewData.movieUid}`,
     );
+  }
+
+  private generateReviewHash(reviewData: ScrapedReview): string {
+    const content = [
+      reviewData.userUid,
+      reviewData.movieUid,
+      reviewData.rating?.toString() || '',
+      reviewData.reviewText.trim(),
+    ].join('|');
+
+    return createHash('sha256').update(content).digest('hex');
+  }
+
+  /**
+   * Push movie to waiting list (Stack LIFO - higher priority processed first)
+   */
+  private async pushToWaitingList(movieId: string): Promise<void> {
+    try {
+      // Check if already in waiting list
+      const existing = await this.waitingListRepository.findOne({
+        where: { movieId },
+      });
+
+      if (existing) {
+        this.logger.log(`Movie ${movieId} already in waiting list`);
+        return;
+      }
+
+      // Use current timestamp as priority for LIFO (later = higher priority)
+      const priority = Date.now();
+
+      const item = new WaitingList();
+      item.movieId = movieId;
+      item.priority = priority;
+
+      await this.waitingListRepository.save(item);
+      this.logger.log(
+        `Added ${movieId} to waiting list (priority: ${priority})`,
+      );
+    } catch (error) {
+      // Ignore duplicate key errors
+      if (
+        !error.message.includes('duplicate') &&
+        !error.message.includes('unique')
+      ) {
+        this.logger.error(`Error adding to waiting list:`, error.message);
+      }
+    }
+  }
+
+  /**
+   * Pop batch of movies from waiting list (Stack LIFO - highest priority first)
+   * More efficient than popping one at a time
+   */
+  private async popBatchFromWaitingList(
+    batchSize: number = 10,
+  ): Promise<string[]> {
+    // Get items with highest priority (most recent)
+    const items = await this.waitingListRepository.find({
+      order: { priority: 'DESC' }, // Descending = LIFO stack behavior
+      take: batchSize,
+    });
+
+    if (items.length === 0) {
+      return [];
+    }
+
+    // Remove batch from waiting list
+    await this.waitingListRepository.remove(items);
+
+    const movieIds = items.map((item) => item.movieId);
+    this.logger.log(
+      `Popped batch of ${movieIds.length} movies from waiting list`,
+    );
+
+    return movieIds;
+  }
+
+  /**
+   * Get waiting list size
+   */
+  async getWaitingListSize(): Promise<number> {
+    return await this.waitingListRepository.count();
+  }
+
+  /**
+   * Clear waiting list (for testing/reset)
+   */
+  async clearWaitingList(): Promise<void> {
+    await this.waitingListRepository.clear();
+    this.logger.log('Waiting list cleared');
   }
 
   /**
