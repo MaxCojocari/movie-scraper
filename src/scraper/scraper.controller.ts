@@ -29,4 +29,16 @@ export class ScraperController {
     await this.scraperService.clearWaitingList();
     return { message: 'Queue cleared' };
   }
+
+  @Post('movies/repair')
+  async repairIncompleteMovies(
+    @Query('batch_size') batchSize?: number,
+    @Query('max_movies') maxMovies?: number,
+  ) {
+    this.scraperService.repairIncompleteMovies(batchSize, maxMovies);
+
+    return {
+      message: 'Started repairing incomplete movies',
+    };
+  }
 }

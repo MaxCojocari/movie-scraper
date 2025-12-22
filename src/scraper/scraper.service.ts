@@ -318,7 +318,7 @@ export class ScraperService implements OnModuleDestroy {
           By.css('a[data-id="genres"]'),
         );
         await genresTab.click();
-        await this.sleep(500);
+        await this.sleep(1000);
 
         const tabGenres = await driver.findElement(By.css('#tab-genres'));
         const genreDiv = await tabGenres.findElement(By.css('.text-sluglist'));
@@ -348,7 +348,7 @@ export class ScraperService implements OnModuleDestroy {
 
           for (const link of themeLinks) {
             const theme = await link.getText();
-            if (theme && theme !== 'Show All…') {
+            if (theme && theme !== 'Show All...') {
               movie.themes.push(theme);
             }
           }
@@ -378,6 +378,197 @@ export class ScraperService implements OnModuleDestroy {
     } catch (error) {
       this.logger.error(`Error scraping movie page ${slug}:`, error.message);
       throw error;
+    }
+  }
+
+  /**
+   * Find movies with incomplete data
+   */
+  async findIncompleteMovies(): Promise<string[]> {
+    const incompleteMovies = await this.movieRepository
+      .createQueryBuilder('movie')
+      .select('movie.movieUid')
+      .where(
+        `movie.movieName IS NULL OR movie.movieName = '' OR
+       movie.releaseYear IS NULL OR movie.releaseYear = 0 OR
+       movie.watchedBy IS NULL OR movie.watchedBy = 0 OR
+       movie.avgRating IS NULL OR movie.avgRating = 0 OR
+       movie.synopsis IS NULL OR movie.synopsis = '' OR
+       movie.genres IS NULL OR movie.genres = '' OR
+       movie.themes IS NULL OR movie.themes = '' OR
+       movie.director IS NULL OR movie.director = '' OR
+       movie.cast IS NULL OR movie.cast = ''`,
+      )
+      .getMany();
+
+    return incompleteMovies.map((m) => m.movieUid);
+  }
+
+  async repairIncompleteMovies(
+    batchSize: number = 1,
+    maxMovies?: number,
+  ): Promise<void> {
+    this.logger.log('Starting incomplete movies repair process');
+
+    const incompleteMovieIds = await this.findIncompleteMovies();
+
+    if (incompleteMovieIds.length === 0) {
+      this.logger.log('No incomplete movies found. All data is complete!');
+      return;
+    }
+
+    const totalToRepair = maxMovies
+      ? Math.min(incompleteMovieIds.length, maxMovies)
+      : incompleteMovieIds.length;
+
+    this.logger.log(
+      `Found ${incompleteMovieIds.length} incomplete movies. ` +
+        `Will repair ${totalToRepair} movies.`,
+    );
+
+    // Process in batches
+    for (let i = 0; i < totalToRepair; i += batchSize) {
+      const batch = incompleteMovieIds.slice(
+        i,
+        Math.min(i + batchSize, totalToRepair),
+      );
+
+      this.logger.log(
+        `Processing batch ${Math.floor(i / batchSize) + 1}: ${batch.length} movies`,
+      );
+
+      for (const movieUid of batch) {
+        try {
+          // Get current movie data
+          const oldMovie = await this.movieRepository.findOne({
+            where: { movieUid },
+          });
+
+          if (!oldMovie) {
+            this.logger.warn(`Movie ${movieUid} not found in database`);
+            continue;
+          }
+
+          this.logger.log(
+            `Re-scraping: ${movieUid} (${oldMovie.movieName || 'Unknown'})`,
+          );
+
+          // Re-scrape the movie
+          const newMovieData = await this.scrapeMoviePage(movieUid);
+
+          // Compare and update only missing fields
+          const updates: any = {};
+          let hasUpdates = false;
+
+          if (!oldMovie.movieName || oldMovie.movieName === '') {
+            updates.title = newMovieData.title;
+            hasUpdates = true;
+          }
+          if (!oldMovie.releaseYear || oldMovie.releaseYear === 0) {
+            updates.releaseYear = newMovieData.releaseYear;
+            hasUpdates = true;
+          }
+          if (!oldMovie.watchedBy || oldMovie.watchedBy === 0) {
+            updates.watchedByCount = newMovieData.watchedBy;
+            hasUpdates = true;
+          }
+          if (!oldMovie.avgRating || oldMovie.avgRating === 0) {
+            updates.avgRating = newMovieData.avgRating;
+            hasUpdates = true;
+          }
+          if (!oldMovie.synopsis || oldMovie.synopsis === '') {
+            updates.synopsis = newMovieData.synopsis;
+            hasUpdates = true;
+          }
+          if (!oldMovie.genres || oldMovie.genres === '') {
+            updates.genres = newMovieData.genres.join(', ');
+            hasUpdates = true;
+          }
+          if (!oldMovie.themes || oldMovie.themes === '') {
+            updates.themes = newMovieData.themes.join('|');
+            hasUpdates = true;
+          }
+          if (!oldMovie.director || oldMovie.director === '') {
+            updates.director = newMovieData.director.join(', ');
+            hasUpdates = true;
+          }
+          if (!oldMovie.cast || oldMovie.cast === '') {
+            updates.cast = newMovieData.cast.join(', ');
+            hasUpdates = true;
+          }
+
+          if (hasUpdates) {
+            // Update the movie
+            await this.movieRepository.update({ movieUid }, updates);
+            const updatedFields = Object.keys(updates).join(', ');
+            this.logger.log(
+              `Repaired ${movieUid}: Updated fields [${updatedFields}]`,
+            );
+          } else {
+            this.logger.log(
+              `No missing fields found for ${movieUid} (already complete)`,
+            );
+          }
+
+          // Small delay to avoid overwhelming the server
+          await this.sleep(2000);
+        } catch (error) {
+          this.logger.error(`Failed to repair ${movieUid}:`, error.message);
+        }
+      }
+
+      this.logger.log('Repair process complete!');
+    }
+  }
+  /**
+   * Update a single movie by re-scraping
+   */
+  async updateSingleMovie(
+    movieUid: string,
+  ): Promise<{ success: boolean; message: string; updated?: any }> {
+    try {
+      const oldMovie = await this.movieRepository.findOne({
+        where: { movieUid },
+      });
+
+      if (!oldMovie) {
+        return {
+          success: false,
+          message: `Movie ${movieUid} not found in database`,
+        };
+      }
+
+      this.logger.log(`Re-scraping movie: ${movieUid}`);
+
+      const newMovieData = await this.scrapeMoviePage(movieUid);
+
+      // Update all fields
+      oldMovie.movieName = newMovieData.title;
+      oldMovie.releaseYear = newMovieData.releaseYear;
+      oldMovie.watchedBy = newMovieData.watchedBy;
+      oldMovie.avgRating = newMovieData.avgRating;
+      oldMovie.synopsis = newMovieData.synopsis;
+      oldMovie.genres = newMovieData.genres.join(', ');
+      oldMovie.themes = newMovieData.themes.join('|');
+      oldMovie.director = newMovieData.director.join(', ');
+      oldMovie.cast = newMovieData.cast.join(', ');
+
+      await this.movieRepository.save(oldMovie);
+
+      return {
+        success: true,
+        message: `Successfully updated ${movieUid}`,
+        updated: {
+          title: newMovieData.title,
+          releaseYear: newMovieData.releaseYear,
+          avgRating: newMovieData.avgRating,
+        },
+      };
+    } catch (error) {
+      return {
+        success: false,
+        message: `Failed to update ${movieUid}: ${error.message}`,
+      };
     }
   }
 
