@@ -277,17 +277,45 @@ export class ScraperService implements OnModuleDestroy {
 
       // Synopsis
       try {
-        const synopsisEl = await driver.findElement(By.css('.truncate p'));
-        movie.synopsis = await synopsisEl.getText();
-      } catch (e) {
+        // Check if there's a "...more" button and click it
         try {
-          const synopsisEl = await driver.findElement(
-            By.css('.review.body-text p'),
+          const moreButton = await driver.findElement(
+            By.css('.condense_control_more'),
           );
-          movie.synopsis = await synopsisEl.getText();
-        } catch (e2) {
-          this.logger.warn(`Synopsis not found for ${slug}`);
+          await moreButton.click();
+          await this.sleep(500);
+          this.logger.log(`Expanded synopsis for ${slug}`);
+        } catch (e) {
+          // No "...more" button, synopsis is already fully visible
         }
+
+        // Extract full synopsis from the expanded div
+        try {
+          // Try to get from the condenseable div (which becomes visible after clicking)
+          const synopsisDiv = await driver.findElement(
+            By.css('.truncate.condenseable'),
+          );
+          const paragraphs = await synopsisDiv.findElements(By.css('p'));
+
+          const synopsisTexts: string[] = [];
+          for (const p of paragraphs) {
+            const text = await p.getText();
+            // Remove the "×" close button text if present
+            const cleanText = text.replace(/×\s*$/, '').trim();
+            if (cleanText) {
+              synopsisTexts.push(cleanText);
+            }
+          }
+
+          movie.synopsis = synopsisTexts.join('\n\n');
+        } catch (e) {
+          // Fallback: try the original selector
+          const synopsisEl = await driver.findElement(By.css('.truncate p'));
+          movie.synopsis = await synopsisEl.getText();
+        }
+      } catch (e) {
+        this.logger.warn(`Synopsis not found for ${slug}`);
+        console.log(e);
       }
 
       // Cast (first 10 from main page)
@@ -317,8 +345,17 @@ export class ScraperService implements OnModuleDestroy {
         const genresTab = await driver.findElement(
           By.css('a[data-id="genres"]'),
         );
+        // Scroll element into view
+        await driver.executeScript(
+          'arguments[0].scrollIntoView({block: "center"});',
+          genresTab,
+        );
+        await this.sleep(500); // Wait for scroll to complete
         await genresTab.click();
-        await this.sleep(1000);
+        await driver.wait(
+          until.elementIsVisible(driver.findElement(By.css('#tab-genres'))),
+          5000,
+        );
 
         const tabGenres = await driver.findElement(By.css('#tab-genres'));
         const genreDiv = await tabGenres.findElement(By.css('.text-sluglist'));
@@ -330,6 +367,7 @@ export class ScraperService implements OnModuleDestroy {
         }
       } catch (e) {
         this.logger.warn(`Genres not found for ${slug}`);
+        console.log(e);
       }
 
       // Themes are in the same tab as genres (no need to click)
@@ -348,13 +386,14 @@ export class ScraperService implements OnModuleDestroy {
 
           for (const link of themeLinks) {
             const theme = await link.getText();
-            if (theme && theme !== 'Show All...') {
+            if (theme && theme !== 'Show All…') {
               movie.themes.push(theme);
             }
           }
         }
       } catch (e) {
         this.logger.warn(`Themes not found for ${slug}`);
+        console.log(e);
       }
 
       // Click Crew tab and extract director
@@ -372,6 +411,7 @@ export class ScraperService implements OnModuleDestroy {
         }
       } catch (e) {
         this.logger.warn(`Director not found for ${slug}`);
+        console.log(e);
       }
 
       return movie;
