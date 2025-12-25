@@ -730,6 +730,57 @@ export class ScraperService implements OnModuleDestroy {
   }
 
   /**
+   * Process existing waiting list without adding new films
+   * Scrapes movies already queued, skips review scraping
+   */
+  async processWaitingList(): Promise<void> {
+    this.logger.log('Starting waiting list processing (no new film discovery)');
+
+    let filmsProcessed = 0;
+
+    // Get initial queue size
+    const initialQueueSize = await this.getWaitingListSize();
+    this.logger.log(`Initial queue size: ${initialQueueSize} films`);
+
+    while (true) {
+      // Pop one film from waiting list
+      const filmSlug = await this.popFromWaitingList();
+
+      if (!filmSlug) {
+        this.logger.log('✅ Waiting list is empty. Processing complete!');
+        break;
+      }
+
+      // Check if already scraped
+      const alreadyScraped = await this.isMovieScraped(filmSlug);
+      if (alreadyScraped) {
+        this.logger.log(`Film ${filmSlug} already scraped, skipping`);
+        continue;
+      }
+
+      try {
+        this.logger.log(`Scraping film: ${filmSlug}`);
+        const movieData = await this.scrapeMoviePage(filmSlug);
+
+        await this.saveMovie(movieData);
+        filmsProcessed++;
+
+        const remainingQueue = await this.getWaitingListSize();
+
+        this.logger.log(
+          `Processed: ${filmsProcessed} | Remaining: ${remainingQueue}`,
+        );
+
+        await this.sleep(2000);
+      } catch (error) {
+        this.logger.error(`Error scraping film ${filmSlug}:`, error.message);
+      }
+    }
+
+    this.logger.log(`🎉 Waiting list processing complete!`);
+  }
+
+  /**
    * Extract full review text handling spoilers and "more" expansions
    */
   private async extractFullReviewText(
@@ -919,6 +970,27 @@ export class ScraperService implements OnModuleDestroy {
     );
 
     return movieIds;
+  }
+
+  private async popFromWaitingList(): Promise<string | null> {
+    try {
+      const item = await this.waitingListRepository.findOne({
+        where: {},
+        order: { priority: 'DESC' },
+      });
+
+      if (!item) {
+        return null;
+      }
+
+      const movieId = item.movieId;
+      await this.waitingListRepository.remove(item);
+
+      return movieId;
+    } catch (error) {
+      this.logger.error('Error popping from waiting list:', error.message);
+      return null;
+    }
   }
 
   /**

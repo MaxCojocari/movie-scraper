@@ -41,4 +41,23 @@ export class ScraperController {
       message: 'Started repairing incomplete movies',
     };
   }
+
+  @Post('process-queue')
+  async processWaitingList() {
+    const queueSize = await this.scraperService.getWaitingListSize();
+
+    if (queueSize === 0) {
+      return {
+        message: 'Queue is empty. Nothing to process.',
+        queueSize: 0,
+      };
+    }
+
+    this.scraperService.processWaitingList();
+
+    return {
+      message: 'Started processing waiting list',
+      queueSize,
+    };
+  }
 }
