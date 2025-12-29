@@ -13,6 +13,7 @@ services:
       - postgres_data:/var/lib/postgresql/data
 
   chrome:
+    # use image seleniarm/standalone-chromium:latest for ARM based systems
     image: selenium/standalone-chrome:latest
     container_name: letterboxd-chrome
     restart: always
