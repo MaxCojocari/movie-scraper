@@ -60,4 +60,12 @@ export class ScraperController {
       queueSize,
     };
   }
+
+  @Post('enrich-reviews')
+  async enrichReviews() {
+    this.scraperService.enrichExistingUsersWithPopularFilmReviews();
+    return {
+      message: 'Started enriching reviews',
+    };
+  }
 }

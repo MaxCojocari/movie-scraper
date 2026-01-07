@@ -12,10 +12,10 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
 
-  chrome:
+  chrome-reviews:
     # use image seleniarm/standalone-chromium:latest for ARM based systems
     image: selenium/standalone-chrome:latest
-    container_name: letterboxd-chrome
+    container_name: letterboxd-chrome-reviews
     restart: always
     ports:
       - '4444:4444'
@@ -23,7 +23,20 @@ services:
     shm_size: 2gb
     environment:
       - SE_NODE_MAX_SESSIONS=5
-      - SE_NODE_SESSION_TIMEOUT=300
+      - SE_NODE_SESSION_TIMEOUT=3600
+
+  chrome-movies:
+    # use image seleniarm/standalone-chromium:latest for ARM based systems
+    image: selenium/standalone-chrome:latest
+    container_name: letterboxd-chrome-movies
+    restart: always
+    ports:
+      - '4445:4444'
+      - '7901:7900' # VNC port for debugging
+    shm_size: 2gb
+    environment:
+      - SE_NODE_MAX_SESSIONS=5
+      - SE_NODE_SESSION_TIMEOUT=3600
 
 volumes:
   postgres_data:

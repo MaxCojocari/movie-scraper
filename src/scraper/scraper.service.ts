@@ -15,12 +15,15 @@ import { Review } from '../database/entities/review.entity';
 import { ScrapedMovie, ScrapedReview } from './interfaces';
 import { WaitingList } from '../database/entities/waiting-list.entity';
 import { createHash } from 'crypto';
+import { ProcessedUser } from '../database/entities/processed-movie.entity';
 
 @Injectable()
 export class ScraperService implements OnModuleDestroy {
   private readonly logger = new Logger(ScraperService.name);
   private driver: WebDriver;
   private readonly baseUrl = 'https://letterboxd.com';
+  private readonly seleniumUrl =
+    process.env.SELENIUM_URL || 'http://localhost:4444';
 
   constructor(
     @InjectRepository(Movie)
@@ -29,9 +32,20 @@ export class ScraperService implements OnModuleDestroy {
     private reviewRepository: Repository<Review>,
     @InjectRepository(WaitingList)
     private waitingListRepository: Repository<WaitingList>,
+    @InjectRepository(ProcessedUser)
+    private processedUserRepository: Repository<ProcessedUser>,
   ) {}
 
   private async getDriver(): Promise<WebDriver> {
+    try {
+      if (this.driver) {
+        await this.driver.getTitle();
+        return this.driver;
+      }
+    } catch (error) {
+      this.logger.warn('WebDriver session stale, recreating...', error.message);
+    }
+
     if (!this.driver) {
       const options = new chrome.Options();
       options.addArguments('--headless');
@@ -46,10 +60,10 @@ export class ScraperService implements OnModuleDestroy {
       this.driver = await new Builder()
         .forBrowser(Browser.CHROME)
         .setChromeOptions(options)
-        .usingServer('http://localhost:4444')
+        .usingServer(this.seleniumUrl)
         .build();
 
-      this.logger.log('WebDriver initialized');
+      this.logger.log(`WebDriver initialized: ${this.seleniumUrl}`);
     }
     return this.driver;
   }
@@ -162,6 +176,42 @@ export class ScraperService implements OnModuleDestroy {
     }
 
     this.logger.log(`Scraping complete! Parsed ${newFilmsParsed} new films`);
+  }
+
+  async enrichExistingUsersWithPopularFilmReviews() {
+    this.logger.log('Starting user enrichment with popular film reviews');
+
+    // Get all unique user IDs from reviews table
+    const userIds = await this.getAllUserIdsFromReviews();
+    this.logger.log(`Found ${userIds.length} users to enrich`);
+
+    let totalUsersProcessed = 0;
+    let newReviewsAdded = 0;
+
+    for (const userId of userIds) {
+      try {
+        this.logger.log(
+          `Enriching user ${totalUsersProcessed + 1}/${userIds.length}: ${userId}`,
+        );
+
+        newReviewsAdded += await this.processReviewer(userId);
+        totalUsersProcessed++;
+
+        // Progress log every 10 users
+        if (totalUsersProcessed % 10 === 0) {
+          this.logger.log(
+            `Progress: ${totalUsersProcessed}/${userIds.length} users | ` +
+              `New reviews: ${newReviewsAdded}`,
+          );
+        }
+
+        await this.sleep(1000);
+      } catch (error) {
+        this.logger.error(`Error enriching user ${userId}:`, error.message);
+      }
+    }
+
+    this.logger.log('✅ Enrichment complete!');
   }
 
   /**
@@ -659,15 +709,17 @@ export class ScraperService implements OnModuleDestroy {
   /**
    * Step 4 & 5: Process reviewer - scrape their reviews and add film slugs to waiting list
    */
-  private async processReviewer(username: string) {
+  private async processReviewer(username: string): Promise<number> {
     const driver = await this.getDriver();
-    const url = `${this.baseUrl}/${username}/films/reviews/by/activity/page/1/`;
+    // const url = `${this.baseUrl}/${username}/films/reviews/by/activity/page/1/`;
+    const url = `${this.baseUrl}/${username}/reviews/films/by/popular/`;
+    let newReviewsAdded = 0;
 
     try {
       this.logger.log(`Processing reviewer: ${username}`);
       await driver.get(url);
       await driver.wait(until.elementLocated(By.css('body')), 30000);
-      await this.sleep(1500);
+      await this.sleep(1000);
 
       // Find all review articles (12 per page)
       const reviewArticles = await driver.findElements(
@@ -704,7 +756,8 @@ export class ScraperService implements OnModuleDestroy {
             reviewText,
           };
 
-          await this.saveReview(review);
+          const isNewReview = await this.saveReview(review);
+          if (isNewReview) newReviewsAdded++;
 
           // Step 5: Add film slug to waiting list if not already scraped
           const alreadyScraped = await this.isMovieScraped(filmSlug);
@@ -721,12 +774,15 @@ export class ScraperService implements OnModuleDestroy {
           );
         }
       }
+      await this.markUserAsProcessed(username, newReviewsAdded);
     } catch (error) {
       this.logger.error(
         `Error processing reviewer ${username}:`,
         error.message,
       );
     }
+
+    return newReviewsAdded;
   }
 
   /**
@@ -758,23 +814,19 @@ export class ScraperService implements OnModuleDestroy {
         continue;
       }
 
-      try {
-        this.logger.log(`Scraping film: ${filmSlug}`);
-        const movieData = await this.scrapeMoviePage(filmSlug);
+      this.logger.log(`Scraping film: ${filmSlug}`);
+      const movieData = await this.scrapeMoviePage(filmSlug);
 
-        await this.saveMovie(movieData);
-        filmsProcessed++;
+      await this.saveMovie(movieData);
+      filmsProcessed++;
 
-        const remainingQueue = await this.getWaitingListSize();
+      const remainingQueue = await this.getWaitingListSize();
 
-        this.logger.log(
-          `Processed: ${filmsProcessed} | Remaining: ${remainingQueue}`,
-        );
+      this.logger.log(
+        `Processed: ${filmsProcessed} | Remaining: ${remainingQueue}`,
+      );
 
-        await this.sleep(2000);
-      } catch (error) {
-        this.logger.error(`Error scraping film ${filmSlug}:`, error.message);
-      }
+      await this.sleep(2000);
     }
 
     this.logger.log(`🎉 Waiting list processing complete!`);
@@ -869,7 +921,7 @@ export class ScraperService implements OnModuleDestroy {
   /**
    * Save review to database
    */
-  private async saveReview(reviewData: ScrapedReview): Promise<void> {
+  private async saveReview(reviewData: ScrapedReview): Promise<boolean> {
     const reviewHash = this.generateReviewHash(reviewData);
 
     const existing = await this.reviewRepository.findOne({
@@ -880,7 +932,7 @@ export class ScraperService implements OnModuleDestroy {
       this.logger.log(
         `Review hash ${reviewHash.substring(0, 8)}... already exists, skipping`,
       );
-      return;
+      return false;
     }
 
     const review = new Review();
@@ -894,6 +946,7 @@ export class ScraperService implements OnModuleDestroy {
     this.logger.log(
       `Saved review: ${reviewData.userUid} -> ${reviewData.movieUid}`,
     );
+    return true;
   }
 
   private generateReviewHash(reviewData: ScrapedReview): string {
@@ -930,9 +983,6 @@ export class ScraperService implements OnModuleDestroy {
       item.priority = priority;
 
       await this.waitingListRepository.save(item);
-      this.logger.log(
-        `Added ${movieId} to waiting list (priority: ${priority})`,
-      );
     } catch (error) {
       // Ignore duplicate key errors
       if (
@@ -1016,6 +1066,78 @@ export class ScraperService implements OnModuleDestroy {
       where: { movieUid: slug },
     });
     return count > 0;
+  }
+
+  /**
+   * Mark user as processed
+   */
+  private async markUserAsProcessed(
+    userId: string,
+    reviewsScraped: number,
+  ): Promise<void> {
+    const processedUser = new ProcessedUser();
+    processedUser.userUid = userId;
+    processedUser.reviewsScraped = reviewsScraped;
+
+    try {
+      await this.processedUserRepository.save(processedUser);
+      this.logger.log(`✓ Marked ${userId} as processed`);
+    } catch (error) {
+      // Ignore duplicate errors
+      if (
+        !error.message.includes('duplicate') &&
+        !error.message.includes('unique')
+      ) {
+        throw error;
+      }
+    }
+  }
+
+  /**
+   * Get all unique user IDs from reviews that haven't been processed yet
+   */
+  async getAllUserIdsFromReviews(): Promise<string[]> {
+    const results = await this.reviewRepository
+      .createQueryBuilder('review')
+      .select('DISTINCT review.userUid', 'userUid')
+      .leftJoin(
+        'processed_users',
+        'processed',
+        'processed.user_uid = review.userUid',
+      )
+      .where('processed.user_uid IS NULL')
+      .getRawMany();
+
+    return results.map((r) => r.userUid);
+  }
+
+  /**
+   * Get enrichment statistics
+   */
+  async getEnrichmentStats(): Promise<{
+    totalUsers: number;
+    processedUsers: number;
+    remainingUsers: number;
+    totalReviewsAdded: number;
+  }> {
+    const totalUsers = await this.reviewRepository
+      .createQueryBuilder('review')
+      .select('COUNT(DISTINCT review.userUid)', 'count')
+      .getRawOne();
+
+    const processedCount = await this.processedUserRepository.count();
+
+    const totalReviewsAdded = await this.processedUserRepository
+      .createQueryBuilder('processed')
+      .select('SUM(processed.reviewsScraped)', 'total')
+      .getRawOne();
+
+    return {
+      totalUsers: parseInt(totalUsers.count),
+      processedUsers: processedCount,
+      remainingUsers: parseInt(totalUsers.count) - processedCount,
+      totalReviewsAdded: parseInt(totalReviewsAdded.total || '0'),
+    };
   }
 
   private sleep(ms: number): Promise<void> {
