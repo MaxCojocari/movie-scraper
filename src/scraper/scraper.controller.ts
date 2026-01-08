@@ -63,8 +63,14 @@ export class ScraperController {
   }
 
   @Post('enrich-reviews')
-  async enrichReviews() {
-    this.scraperService.enrichExistingUsersWithPopularFilmReviews();
+  async enrichReviews(
+    @Query('partition_index') partitionIndex?: number,
+    @Query('total_partitions') totalPartitions?: number,
+  ) {
+    this.scraperService.enrichExistingUsersWithPopularFilmReviews(
+      partitionIndex,
+      totalPartitions,
+    );
     return {
       message: 'Started enriching reviews',
     };

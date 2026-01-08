@@ -178,12 +178,19 @@ export class ScraperService implements OnModuleDestroy {
     this.logger.log(`Scraping complete! Parsed ${newFilmsParsed} new films`);
   }
 
-  async enrichExistingUsersWithPopularFilmReviews() {
+  async enrichExistingUsersWithPopularFilmReviews(
+    partitionIndex?: number,
+    totalPartitions?: number,
+  ) {
     this.logger.log('Starting user enrichment with popular film reviews');
 
     // Get all unique user IDs from reviews table
-    const userIds = await this.getAllUserIdsFromReviews();
+    const userIds = await this.getAllUserIdsFromReviews(
+      partitionIndex,
+      totalPartitions,
+    );
     this.logger.log(`Found ${userIds.length} users to enrich`);
+    this.logger.log(`First ${userIds[0]}, last ${userIds[userIds.length - 1]}`);
 
     let totalUsersProcessed = 0;
     let newReviewsAdded = 0;
@@ -1096,7 +1103,10 @@ export class ScraperService implements OnModuleDestroy {
   /**
    * Get all unique user IDs from reviews that haven't been processed yet
    */
-  async getAllUserIdsFromReviews(): Promise<string[]> {
+  async getAllUserIdsFromReviews(
+    partitionIndex?: number,
+    totalPartitions?: number,
+  ): Promise<string[]> {
     const results = await this.reviewRepository
       .createQueryBuilder('review')
       .select('DISTINCT review.userUid', 'userUid')
@@ -1106,9 +1116,37 @@ export class ScraperService implements OnModuleDestroy {
         'processed.user_uid = review.userUid',
       )
       .where('processed.user_uid IS NULL')
+      .orderBy('review.userUid', 'ASC') // Important: consistent ordering for partitioning
       .getRawMany();
 
-    return results.map((r) => r.userUid);
+    const allUserIds = results.map((r) => r.userUid);
+
+    // If no partitioning requested, return all
+    if (partitionIndex === undefined || totalPartitions === undefined) {
+      return allUserIds;
+    }
+
+    // Validate partition parameters
+    if (partitionIndex < 0 || partitionIndex >= totalPartitions) {
+      throw new Error(
+        `Invalid partitionIndex ${partitionIndex}. Must be between 0 and ${totalPartitions - 1}`,
+      );
+    }
+
+    if (totalPartitions <= 0) {
+      throw new Error(`totalPartitions must be greater than 0`);
+    }
+
+    // Calculate partition boundaries
+    const totalUsers = allUserIds.length;
+    const partitionSize = Math.ceil(totalUsers / totalPartitions);
+    const startIndex = partitionIndex * partitionSize;
+    const endIndex = Math.min(startIndex + partitionSize, totalUsers);
+
+    // Extract the partition
+    const partition = allUserIds.slice(startIndex, endIndex);
+
+    return partition;
   }
 
   /**
