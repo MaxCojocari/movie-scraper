@@ -1,5 +1,6 @@
 import { Controller, Delete, Get, Post, Query } from '@nestjs/common';
 import { ScraperService } from './scraper.service';
+import { count } from 'console';
 
 @Controller('scraper')
 export class ScraperController {
@@ -66,6 +67,15 @@ export class ScraperController {
     this.scraperService.enrichExistingUsersWithPopularFilmReviews();
     return {
       message: 'Started enriching reviews',
+    };
+  }
+
+  @Get('user-ids')
+  async getUnprocessedUserIdsFromReviews() {
+    const res = await this.scraperService.getAllUserIdsFromReviews();
+    return {
+      count: res.length,
+      ids: res,
     };
   }
 }
